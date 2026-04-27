@@ -306,7 +306,11 @@ async function predict(text, labels) {
         attention_mask: new ort.Tensor('int64', toBig(leEnc.attention_mask.data), leEnc.attention_mask.dims),
     };
     const arcticOut = await arctic.run(arcticFeed);
-    const clsData = new Float32Array(arcticOut[arctic.outputNames[0]].data);
+    const arcticRaw = arcticOut[arctic.outputNames[0]].data;
+    let clsData;
+    if (arcticRaw instanceof Float32Array) { clsData = arcticRaw; }
+    else { clsData = new Float32Array(Array.from(arcticRaw).map(Number)); }
+    console.log('Arctic output type:', arcticRaw.constructor?.name, 'norm[0]:', Math.sqrt(clsData.slice(0,1024).reduce((s,v)=>s+v*v,0)).toFixed(2));
     const N4 = labels.length * 4;
 
     const projected = matmulTransB(clsData, N4, 1024, projW, 640, 1024);
@@ -325,9 +329,38 @@ async function predict(text, labels) {
     let hiddenData = null;
     for (const name of bb.outputNames) {
         const t = bbOut[name];
-        if (t.dims.length === 3 && t.dims[2] === 640) { hiddenData = new Float32Array(t.data); break; }
+        if (t.dims.length === 3 && t.dims[2] === 640) {
+            const raw = t.data;
+            if (raw instanceof Float32Array) {
+                hiddenData = raw;
+            } else if (raw instanceof Float64Array) {
+                hiddenData = new Float32Array(raw);
+            } else if (raw instanceof Uint16Array || raw.constructor?.name === 'Float16Array') {
+                hiddenData = new Float32Array(raw.length);
+                for (let i = 0; i < raw.length; i++) {
+                    const bits = raw[i];
+                    const sign = (bits >> 15) & 1;
+                    const exp = (bits >> 10) & 0x1F;
+                    const frac = bits & 0x3FF;
+                    if (exp === 0) hiddenData[i] = (sign ? -1 : 1) * Math.pow(2, -14) * (frac / 1024);
+                    else if (exp === 31) hiddenData[i] = frac ? NaN : (sign ? -Infinity : Infinity);
+                    else hiddenData[i] = (sign ? -1 : 1) * Math.pow(2, exp - 15) * (1 + frac / 1024);
+                }
+            } else {
+                hiddenData = new Float32Array(Array.from(raw).map(Number));
+            }
+            console.log('Hidden output:', name, 'type:', raw.constructor?.name, 'dims:', t.dims, 'norm[0]:', Math.sqrt(hiddenData.slice(0,640).reduce((s,v)=>s+v*v,0)).toFixed(2));
+            break;
+        }
     }
     if (!hiddenData) throw new Error('Hidden states output not found in backbone');
+
+    // Debug: check O embed dot product vs label embed dot product for first token
+    {
+        let dotO = 0, dotL = 0;
+        for (let k=0;k<640;k++) { dotO += hiddenData[k]*embeds[k]; dotL += hiddenData[k]*embeds[640+k]; }
+        console.log('Debug scores token0: O=', dotO.toFixed(3), 'label[0]=', dotL.toFixed(3));
+    }
 
     const scores = matmulTransB(hiddenData, T, 640, embeds, nTags, 640);
     const trans = buildTrans(labels.length);
