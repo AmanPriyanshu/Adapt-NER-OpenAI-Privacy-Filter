@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Adaptive NER — Browser Demo</title>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/ort.webgpu.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f172a;color:#e2e8f0;font-family:system-ui,-apple-system,sans-serif;line-height:1.6}
+.container{max-width:960px;margin:0 auto;padding:24px 16px}
+header{text-align:center;margin-bottom:32px}
+header h1{font-size:2em;font-weight:700;background:linear-gradient(135deg,#3b82f6,#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+header p{color:#94a3b8;font-size:0.95em;margin-top:4px}
+section{background:#1e293b;border-radius:12px;padding:24px;margin-bottom:20px}
+h2{font-size:1.2em;font-weight:600;margin-bottom:16px;color:#f1f5f9}
+button{background:#3b82f6;color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:0.95em;cursor:pointer;font-weight:500;transition:background .15s}
+button:hover{background:#2563eb}
+button:disabled{background:#334155;color:#64748b;cursor:not-allowed}
+.progress-area{margin-top:16px}
+.progress-row{display:flex;align-items:center;gap:12px;margin-bottom:10px;font-size:0.85em;color:#94a3b8}
+.progress-row span:first-child{min-width:160px}
+.progress-bar{flex:1;height:8px;background:#334155;border-radius:4px;overflow:hidden}
+.progress-fill{height:100%;background:#3b82f6;border-radius:4px;width:0%;transition:width .2s}
+.progress-fill.done{background:#22c55e}
+#load-status{margin-top:12px;font-size:0.85em;color:#94a3b8}
+.error{color:#ef4444}
+textarea{width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:12px;color:#e2e8f0;font-family:monospace;font-size:0.9em;resize:vertical}
+textarea:focus{outline:none;border-color:#3b82f6}
+.label-area{margin:12px 0;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:4px;background:#334155;padding:4px 10px;border-radius:16px;font-size:0.82em;color:#e2e8f0}
+.chip button{background:none;color:#94a3b8;padding:0;font-size:1.1em;line-height:1;min-width:auto}
+.chip button:hover{color:#ef4444;background:none}
+#label-input{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px 12px;color:#e2e8f0;font-size:0.85em;width:180px}
+#label-input:focus{outline:none;border-color:#3b82f6}
+#run-btn,#test-btn{margin-top:12px}
+.result-text{background:#0f172a;border-radius:8px;padding:16px;margin-top:16px;font-family:monospace;font-size:0.9em;line-height:1.8;white-space:pre-wrap;word-break:break-word}
+.entity{padding:2px 4px;border-radius:3px;position:relative}
+.entity-tag{font-size:0.65em;vertical-align:super;font-weight:700;margin-left:2px;font-family:system-ui,sans-serif}
+.entity-list{margin-top:12px;font-size:0.85em;color:#94a3b8}
+.entity-list .ent-item{display:inline-block;margin:3px 4px;padding:2px 8px;border-radius:4px;font-family:monospace;font-size:0.9em}
+.test-row{border-bottom:1px solid #334155;padding:12px 0}
+.test-row:last-child{border-bottom:none}
+.test-header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.test-name{font-weight:600;min-width:140px;font-size:0.95em}
+.badge{padding:2px 10px;border-radius:12px;font-size:0.78em;font-weight:600}
+.badge-perfect{background:#22c55e22;color:#22c55e;border:1px solid #22c55e44}
+.badge-extra{background:#06b6d422;color:#06b6d4;border:1px solid #06b6d444}
+.badge-partial{background:#eab30822;color:#eab308;border:1px solid #eab30844}
+.badge-miss{background:#ef444422;color:#ef4444;border:1px solid #ef444444}
+.badge-fp{background:#ef444422;color:#ef4444;border:1px solid #ef444444}
+.test-meta{font-size:0.8em;color:#64748b;margin-left:auto}
+.test-details{font-size:0.82em;color:#64748b;margin-top:6px;font-family:monospace}
+.test-details .missed{color:#ef4444}
+.test-details .extra{color:#f59e0b}
+.test-summary{margin-top:16px;padding:16px;background:#0f172a;border-radius:8px;display:flex;gap:16px;flex-wrap:wrap;align-items:center;font-size:0.9em;font-weight:600}
+.summary-stat{padding:4px 12px;border-radius:8px}
+.running-indicator{display:inline-block;width:10px;height:10px;border:2px solid #3b82f6;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+footer{text-align:center;margin-top:24px;font-size:0.8em;color:#475569}
+footer a{color:#3b82f6;text-decoration:none}
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+<h1>Adaptive NER</h1>
+<p>Zero-shot Named Entity Recognition with arbitrary labels. Runs entirely in your browser via ONNX Runtime Web.</p>
+</header>
+
+<section id="load-section">
+<button id="load-btn" onclick="loadModels()">Load Models (~2.2 GB)</button>
+<div class="progress-area" id="progress-area" style="display:none">
+<div class="progress-row"><span>Backbone (1.6 GB)</span><div class="progress-bar"><div class="progress-fill" id="prog-bb"></div></div></div>
+<div class="progress-row"><span>Label Encoder (542 MB)</span><div class="progress-bar"><div class="progress-fill" id="prog-arctic"></div></div></div>
+<div class="progress-row"><span>Projection (2.6 MB)</span><div class="progress-bar"><div class="progress-fill" id="prog-proj"></div></div></div>
+<div class="progress-row"><span>Tokenizers</span><div class="progress-bar"><div class="progress-fill" id="prog-tok"></div></div></div>
+</div>
+<div id="load-status"></div>
+</section>
+
+<section id="demo-section" style="display:none">
+<h2>Interactive</h2>
+<textarea id="text-input" rows="4">The attacker used Cobalt Strike beacon on port 443 with C2 domain evil.malware.xyz to exfiltrate data via DNS tunneling.</textarea>
+<div class="label-area" id="label-area"></div>
+<input id="label-input" placeholder="Add label (Enter)" />
+<button id="run-btn" onclick="runInteractive()">Run NER</button>
+<div id="results"></div>
+</section>
+
+<section id="test-section" style="display:none">
+<h2>15-Case Test Suite</h2>
+<button id="test-btn" onclick="runTestSuite()">Run All Tests</button>
+<div id="test-results"></div>
+</section>
+
+<footer>
+Models: <a href="https://huggingface.co/AmanPriyanshu/openai-generic-privacy-filter-backbone" target="_blank">Backbone</a>
+&middot; <a href="https://huggingface.co/AmanPriyanshu/openai-generic-privacy-filter-lm-encoder" target="_blank">Label Encoder</a>
+&middot; Powered by ONNX Runtime Web (WebGPU)
+</footer>
+<div id="webgpu-warning" style="display:none;text-align:center;padding:16px;margin:16px;background:#7f1d1d;border-radius:8px;color:#fca5a5;font-size:0.9em">
+⚠ WebGPU not available. This demo requires a WebGPU-capable browser (Chrome 113+, Edge 113+) served over HTTPS or localhost. <code>file://</code> will not work.
+</div>
+</div>
+
+<script type="module">
+import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0';
+
+if (!navigator.gpu) {
+    document.getElementById('webgpu-warning').style.display = 'block';
+    document.getElementById('load-btn').disabled = true;
+}
+
+const HF = 'https://huggingface.co';
+const BB_REPO = 'AmanPriyanshu/openai-generic-privacy-filter-backbone';
+const ENC_REPO = 'AmanPriyanshu/openai-generic-privacy-filter-lm-encoder';
+const BB_GRAPH = `${HF}/${BB_REPO}/resolve/main/model_quantized_hidden.onnx`;
+const BB_DATA = `${HF}/${BB_REPO}/resolve/main/model_quantized.onnx_data`;
+const ARCTIC_URL = `${HF}/${ENC_REPO}/resolve/main/encoder_int8.onnx`;
+const PROJ_URL = `${HF}/${ENC_REPO}/resolve/main/projection.npz`;
+
+const PALETTE = ['#ef4444','#3b82f6','#22c55e','#f59e0b','#8b5cf6','#ec4899','#06b6d4','#f97316','#14b8a6','#6366f1','#84cc16','#d946ef','#0ea5e9','#f43f5e','#a855f7'];
+const TEMPLATES = {B:'beginning of {l}',I:'continuation of {l}',E:'end of {l}',S:'complete {l}'};
+
+let bb, arctic, bbTok, arcticTok, projW, projB, oEmbed;
+let loaded = false;
+
+// ── NPZ / NPY parser ──────────────────────────────────────────────────
+function parseNpy(buf) {
+    const v = new DataView(buf);
+    const major = v.getUint8(6);
+    const hLen = major >= 2 ? v.getUint32(8, true) : v.getUint16(8, true);
+    const hOff = major >= 2 ? 12 : 10;
+    const hdr = new TextDecoder().decode(new Uint8Array(buf, hOff, hLen));
+    const shape = hdr.match(/'shape':\s*\(([^)]*)\)/)[1].split(',').filter(s=>s.trim()).map(Number);
+    return { data: new Float32Array(buf, hOff + hLen), shape };
+}
+async function parseNpz(buf) {
+    const zip = await JSZip.loadAsync(buf);
+    const out = {};
+    for (const [n, f] of Object.entries(zip.files)) {
+        if (!n.endsWith('.npy')) continue;
+        out[n.replace('.npy','')] = parseNpy(await f.async('arraybuffer'));
+    }
+    return out;
+}
+
+// ── Viterbi ────────────────────────────────────────────────────────────
+function buildTrans(nL) {
+    const nT = 1 + 4*nL;
+    const tr = new Float32Array(nT*nT).fill(-1e9);
+    const free = [0];
+    for (let l=0;l<nL;l++) { free.push(4*l+1); free.push(4*l+4); }
+    for (const t of free) tr[0*nT+t] = 0;
+    for (let l=0;l<nL;l++) {
+        const b=4*l+1, i=4*l+2, e=4*l+3, s=4*l+4;
+        tr[b*nT+i]=0; tr[b*nT+e]=0; tr[i*nT+i]=0; tr[i*nT+e]=0;
+        for (const t of free) { tr[e*nT+t]=0; tr[s*nT+t]=0; }
+    }
+    return tr;
+}
+function viterbiDecode(scores, T, nT, tr) {
+    const dp = new Float32Array(T*nT).fill(-1e9);
+    const bp = new Int32Array(T*nT);
+    const nL = (nT-1)/4;
+    for (let j=0;j<nT;j++) {
+        let ok = j===0;
+        if (j>0) { const m=(j-1)%4; ok = m===0||m===3; }
+        dp[j] = ok ? scores[j] : -1e9;
+    }
+    for (let t=1;t<T;t++) {
+        for (let j=0;j<nT;j++) {
+            let best=-1e9, bi=0;
+            for (let i=0;i<nT;i++) {
+                const v = dp[(t-1)*nT+i] + tr[i*nT+j];
+                if (v>best) { best=v; bi=i; }
+            }
+            dp[t*nT+j] = best + scores[t*nT+j];
+            bp[t*nT+j] = bi;
+        }
+    }
+    let bestV=-1e9, bestJ=0;
+    for (let j=0;j<nT;j++) {
+        let ok = j===0;
+        if (j>0) { const m=(j-1)%4; ok = m===2||m===3; }
+        if (!ok) continue;
+        const v = dp[(T-1)*nT+j];
+        if (v>bestV) { bestV=v; bestJ=j; }
+    }
+    const path = new Array(T);
+    path[T-1] = bestJ;
+    for (let t=T-2;t>=0;t--) path[t] = bp[(t+1)*nT+path[t+1]];
+    return path;
+}
+
+// ── Matrix ops ─────────────────────────────────────────────────────────
+function matmulTransB(a, aR, aC, b, bR, bC) {
+    const out = new Float32Array(aR*bR);
+    for (let i=0;i<aR;i++) for (let j=0;j<bR;j++) {
+        let s=0; for (let k=0;k<aC;k++) s += a[i*aC+k]*b[j*bC+k];
+        out[i*bR+j] = s;
+    }
+    return out;
+}
+
+// ── Fetch with progress ────────────────────────────────────────────────
+async function fetchProgress(url, el) {
+    const res = await fetch(url);
+    const total = +(res.headers.get('content-length')||0);
+    const reader = res.body.getReader();
+    const chunks = []; let got = 0;
+    while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        chunks.push(value); got += value.length;
+        if (el && total) el.style.width = (got/total*100)+'%';
+    }
+    if (el) { el.style.width='100%'; el.classList.add('done'); }
+    const buf = new Uint8Array(got); let off=0;
+    for (const c of chunks) { buf.set(c, off); off += c.length; }
+    return buf.buffer;
+}
+
+// ── Load models ────────────────────────────────────────────────────────
+window.loadModels = async function() {
+    const btn = document.getElementById('load-btn');
+    const status = document.getElementById('load-status');
+    btn.disabled = true;
+    document.getElementById('progress-area').style.display = 'block';
+    const el = id => document.getElementById(id);
+
+    try {
+        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
+
+        status.textContent = 'Loading tokenizers...';
+        [bbTok, arcticTok] = await Promise.all([
+            AutoTokenizer.from_pretrained(BB_REPO),
+            AutoTokenizer.from_pretrained(ENC_REPO),
+        ]);
+        el('prog-tok').style.width='100%'; el('prog-tok').classList.add('done');
+
+        status.textContent = 'Downloading backbone graph...';
+        const graphBuf = await fetchProgress(BB_GRAPH, null);
+        status.textContent = 'Downloading backbone weights (1.6 GB)...';
+        const dataBuf = await fetchProgress(BB_DATA, el('prog-bb'));
+        status.textContent = 'Initializing backbone session (WebGPU)...';
+        const bbEPs = ['webgpu', 'wasm'];
+        bb = await ort.InferenceSession.create(graphBuf, {
+            executionProviders: bbEPs,
+            externalData: [{ data: dataBuf, path: 'model_quantized.onnx_data' }],
+        });
+
+        status.textContent = 'Downloading label encoder (542 MB)...';
+        const arcticBuf = await fetchProgress(ARCTIC_URL, el('prog-arctic'));
+        status.textContent = 'Initializing encoder session...';
+        arctic = await ort.InferenceSession.create(arcticBuf, {
+            executionProviders: bbEPs,
+        });
+
+        status.textContent = 'Loading projection...';
+        const projBuf = await fetchProgress(PROJ_URL, el('prog-proj'));
+        const npz = await parseNpz(projBuf);
+        projW = npz.proj_w.data; projB = npz.proj_b.data; oEmbed = npz.o_embed.data;
+        el('prog-proj').style.width='100%'; el('prog-proj').classList.add('done');
+
+        loaded = true;
+        status.innerHTML = '<span style="color:#22c55e">Models loaded. Ready.</span>';
+        document.getElementById('demo-section').style.display = 'block';
+        document.getElementById('test-section').style.display = 'block';
+        initChips(['malware tool','port','command and control domain','exfiltration technique']);
+    } catch(e) {
+        let msg;
+        if (e instanceof Error) msg = e.message;
+        else if (typeof e === 'string') msg = e;
+        else { try { msg = JSON.stringify(e); } catch { msg = String(e); } }
+        status.innerHTML = `<span class="error">Error: ${msg || 'unknown'}</span>`;
+        btn.disabled = false;
+        console.error('Load error:', e);
+    }
+};
+
+// ── Inference ──────────────────────────────────────────────────────────
+async function predict(text, labels) {
+    labels = labels.map(l => l.toLowerCase().trim());
+
+    const enc = await bbTok(text, { add_special_tokens: false, truncation: true, max_length: 4096 });
+    const T = enc.input_ids.dims[1];
+    const rawIds = Array.from(enc.input_ids.data).map(Number);
+    const tokens = rawIds.map(id => bbTok.decode([id]));
+
+    const labelTexts = [];
+    const idx2label = new Map([[0,'O']]);
+    let idx = 1;
+    for (const l of labels) {
+        for (const p of ['B','I','E','S']) {
+            labelTexts.push(TEMPLATES[p].replace('{l}', l));
+            idx2label.set(idx++, `${p}-${l}`);
+        }
+    }
+
+    const leEnc = await arcticTok(labelTexts, { padding: true, truncation: true, max_length: 32 });
+    const arcticFeed = {
+        input_ids: new ort.Tensor('int64', toBig(leEnc.input_ids.data), leEnc.input_ids.dims),
+        attention_mask: new ort.Tensor('int64', toBig(leEnc.attention_mask.data), leEnc.attention_mask.dims),
+    };
+    const arcticOut = await arctic.run(arcticFeed);
+    const clsData = new Float32Array(arcticOut[arctic.outputNames[0]].data);
+    const N4 = labels.length * 4;
+
+    const projected = matmulTransB(clsData, N4, 1024, projW, 640, 1024);
+    for (let i=0;i<N4;i++) for (let j=0;j<640;j++) projected[i*640+j] += projB[j];
+
+    const nTags = 1 + N4;
+    const embeds = new Float32Array(nTags * 640);
+    embeds.set(oEmbed, 0);
+    embeds.set(projected, 640);
+
+    const bbFeed = {
+        input_ids: new ort.Tensor('int64', toBig(enc.input_ids.data), enc.input_ids.dims),
+        attention_mask: new ort.Tensor('int64', toBig(enc.attention_mask.data), enc.attention_mask.dims),
+    };
+    const bbOut = await bb.run(bbFeed);
+    let hiddenData = null;
+    for (const name of bb.outputNames) {
+        const t = bbOut[name];
+        if (t.dims.length === 3 && t.dims[2] === 640) { hiddenData = new Float32Array(t.data); break; }
+    }
+    if (!hiddenData) throw new Error('Hidden states output not found in backbone');
+
+    const scores = matmulTransB(hiddenData, T, 640, embeds, nTags, 640);
+    const trans = buildTrans(labels.length);
+    const path = viterbiDecode(scores, T, nTags, trans);
+
+    return path.map((p,i) => ({ token: tokens[i], label: idx2label.get(p)||'O' }));
+}
+
+function toBig(data) {
+    const out = new BigInt64Array(data.length);
+    for (let i=0;i<data.length;i++) out[i] = BigInt(Number(data[i]));
+    return out;
+}
+
+function extractEntities(results) {
+    const ents = []; let cur = null;
+    for (const {token, label} of results) {
+        if (label.startsWith('S-')) {
+            ents.push({ text: token.trim(), label: label.slice(2) }); cur = null;
+        } else if (label.startsWith('B-')) {
+            cur = { toks: [token], label: label.slice(2) };
+        } else if (label.startsWith('I-') && cur && label.slice(2)===cur.label) {
+            cur.toks.push(token);
+        } else if (label.startsWith('E-') && cur && label.slice(2)===cur.label) {
+            cur.toks.push(token);
+            ents.push({ text: cur.toks.join('').trim(), label: cur.label }); cur = null;
+        } else { cur = null; }
+    }
+    return ents;
+}
+
+// ── Label chips ────────────────────────────────────────────────────────
+let currentLabels = [];
+
+function initChips(labels) {
+    currentLabels = [...labels];
+    renderChips();
+}
+function renderChips() {
+    const area = document.getElementById('label-area');
+    area.innerHTML = currentLabels.map((l,i) =>
+        `<span class="chip"><span>${esc(l)}</span><button onclick="removeLabel(${i})">&times;</button></span>`
+    ).join('');
+}
+window.removeLabel = function(i) { currentLabels.splice(i,1); renderChips(); };
+
+document.getElementById('label-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.value.trim()) {
+        currentLabels.push(e.target.value.trim());
+        e.target.value = '';
+        renderChips();
+    }
+});
+
+// ── Interactive run ────────────────────────────────────────────────────
+window.runInteractive = async function() {
+    if (!loaded) return;
+    const btn = document.getElementById('run-btn');
+    const text = document.getElementById('text-input').value;
+    if (!text.trim() || !currentLabels.length) return;
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="running-indicator"></span>Running...';
+    const resDiv = document.getElementById('results');
+    resDiv.innerHTML = '';
+
+    try {
+        const t0 = performance.now();
+        const results = await predict(text, currentLabels);
+        const elapsed = performance.now() - t0;
+        const entities = extractEntities(results);
+
+        const colorMap = {};
+        currentLabels.forEach((l,i) => colorMap[l.toLowerCase()] = PALETTE[i % PALETTE.length]);
+
+        let html = '<div class="result-text">';
+        let cur = null;
+        for (const {token, label} of results) {
+            if (label.startsWith('B-')) {
+                const c = colorMap[label.slice(2)] || '#888';
+                html += `<span class="entity" style="background:${c}22;border-bottom:2px solid ${c}">`;
+                html += esc(token); cur = label.slice(2);
+            } else if (label.startsWith('S-')) {
+                const c = colorMap[label.slice(2)] || '#888';
+                html += `<span class="entity" style="background:${c}22;border-bottom:2px solid ${c}">${esc(token)}<span class="entity-tag" style="color:${c}">${esc(label.slice(2))}</span></span>`;
+            } else if ((label.startsWith('I-')||label.startsWith('E-')) && cur) {
+                html += esc(token);
+                if (label.startsWith('E-')) {
+                    const c = colorMap[cur] || '#888';
+                    html += `<span class="entity-tag" style="color:${c}">${esc(cur)}</span></span>`;
+                    cur = null;
+                }
+            } else {
+                if (cur) { html += '</span>'; cur = null; }
+                html += esc(token);
+            }
+        }
+        if (cur) html += '</span>';
+        html += '</div>';
+
+        if (entities.length) {
+            html += '<div class="entity-list"><strong>Entities found:</strong><br>';
+            for (const e of entities) {
+                const c = colorMap[e.label] || '#888';
+                html += `<span class="ent-item" style="background:${c}22;border:1px solid ${c}44;color:${c}">${esc(e.label)}: ${esc(e.text)}</span>`;
+            }
+            html += '</div>';
+        } else {
+            html += '<div class="entity-list">No entities found.</div>';
+        }
+        html += `<div style="margin-top:8px;font-size:0.8em;color:#64748b">${elapsed.toFixed(0)}ms</div>`;
+        resDiv.innerHTML = html;
+    } catch(e) {
+        resDiv.innerHTML = `<span class="error">Error: ${e.message}</span>`;
+        console.error(e);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Run NER';
+};
+
+// ── Test suite ─────────────────────────────────────────────────────────
+const TEST_SUITE = [
+    ["C2 infra","The attacker used Cobalt Strike beacon on port 443 with C2 domain evil.malware.xyz to exfiltrate data via DNS tunneling.",["malware tool","port","command and control domain","exfiltration technique"],{"malware tool":["Cobalt Strike"],"port":["443"],"command and control domain":["evil.malware.xyz"]}],
+    ["Leaked secrets","Found hardcoded AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY in the .env file and a private RSA key in deploy/id_rsa.",["cloud credential","secret key","sensitive file","cryptographic key"],{"secret key":["AWS_SECRET_ACCESS_KEY"],"sensitive file":[".env","id_rsa"]}],
+    ["CVE disclosure","The vulnerability CVE-2024-1234 affects OpenSSL 3.0.x and has a CVSS score of 9.8 allowing remote code execution.",["cve identifier","affected software","cvss score","attack type"],{"cve identifier":["CVE-2024-1234"],"affected software":["OpenSSL"]}],
+    ["Contact info","Please contact john.doe@example.com or call +1-555-867-5309 for Dr. Sarah Chen at Stanford University Hospital.",["email","phone number","person","organization"],{"email":["john.doe@example.com"],"phone number":["+1-555-867-5309"],"person":["Sarah Chen"],"organization":["Stanford"]}],
+    ["Financial IDs","My SSN is 123-45-6789 and my credit card is 4111-1111-1111-1111.",["social security number","credit card number","phone number"],{"social security number":["123-45-6789"],"credit card number":["4111-1111-1111-1111"]}],
+    ["Dinosaurs","The Tyrannosaurus Rex was a massive theropod predator that lived alongside Triceratops and Velociraptor during the late Cretaceous period in North America.",["dinosaur species","geological period","continent"],{"dinosaur species":["Tyrannosaurus","Triceratops","Velociraptor"],"geological period":["Cretaceous"],"continent":["North America"]}],
+    ["Basketball","Lebron James scored 38 points in the fourth quarter against the Boston Celtics at Staples Center on January 15th.",["athlete","stat line","team","venue","game date"],{"athlete":["Lebron James"],"team":["Boston Celtics"],"venue":["Staples Center"],"game date":["January 15"]}],
+    ["Classical music","Mozart composed The Magic Flute in 1791 while living in Vienna, Austria.",["composer","musical work","year","city"],{"composer":["Mozart"],"musical work":["Magic Flute"],"year":["1791"],"city":["Vienna"]}],
+    ["Recipe","Mix 200g flour with 3 eggs and 150ml milk, then bake at 180C for 25 minutes.",["ingredient","quantity","temperature","duration"],{"ingredient":["flour","eggs","milk"],"temperature":["180C"],"duration":["25 minutes"]}],
+    ["Oncology","Patient exhibited BRCA1 mutation with elevated CA-125 at 847 U/mL, scheduled for pembrolizumab infusion every 3 weeks.",["gene mutation","biomarker","lab value","drug name","treatment schedule"],{"gene mutation":["BRCA1"],"biomarker":["CA-125"],"lab value":["847"],"drug name":["pembrolizumab"]}],
+    ["Space","The James Webb Space Telescope captured images of the Crab Nebula at infrared wavelength 4.4 microns from its orbit at Lagrange point L2.",["telescope","celestial object","wavelength","orbital location"],{"telescope":["James Webb"],"celestial object":["Crab Nebula"],"wavelength":["4.4 microns"],"orbital location":["L2"]}],
+    ["Fantasy writing","The elven sorceress Aelindra cast Moonfire at the dragon Kolvathrix atop the Obsidian Citadel in the realm of Eryndor.",["character name","spell name","creature","location","realm"],{"character name":["Aelindra"],"spell name":["Moonfire"],"creature":["Kolvathrix"],"location":["Obsidian Citadel"],"realm":["Eryndor"]}],
+    ["Contract","The contract between Acme Corp and Wayne Industries worth $4.2M expires on March 15, 2025 with a 90-day termination clause governed by Delaware law.",["contracting party","contract value","expiration date","governing jurisdiction"],{"contracting party":["Acme","Wayne"],"contract value":["4.2M"],"expiration date":["March 15"],"governing jurisdiction":["Delaware"]}],
+    ["Car specs","The 2024 Porsche 911 GT3 RS has a 4.0L flat-six producing 518hp with a 0-60 time of 3.0 seconds and a top speed of 184mph.",["car model","engine","horsepower","acceleration","top speed"],{"car model":["Porsche 911 GT3"],"engine":["4.0L flat-six"],"horsepower":["518hp"],"top speed":["184mph"]}],
+    ["Negative","The quick brown fox jumps over the lazy dog near the riverbank on a sunny afternoon.",["person","api key","password","email","credit card number"],{}],
+];
+
+function judge(expected, ents) {
+    if (!Object.keys(expected).length && !ents.length) return {hits:[],misses:[],extras:[],verdict:'PERFECT',f1:{}};
+    if (!Object.keys(expected).length && ents.length) return {hits:[],misses:[],extras:ents.map(e=>`${e.label}:${e.text}`),verdict:'FALSE POS',f1:{}};
+    const hits=[], misses=[], matched=new Set();
+    const tp={}, fn={};
+    for (const l in expected) { tp[l]=0; fn[l]=0; }
+    for (const [el, subs] of Object.entries(expected)) {
+        for (const sub of subs) {
+            let found = false;
+            for (let i=0;i<ents.length;i++) {
+                if (matched.has(i)) continue;
+                if (ents[i].text.toLowerCase().includes(sub.toLowerCase())) {
+                    hits.push(`${ents[i].label}:${ents[i].text}`);
+                    matched.add(i); found=true; tp[el]++; break;
+                }
+            }
+            if (!found) { misses.push(`${el}:${sub}`); fn[el]++; }
+        }
+    }
+    const extras=[], fp={};
+    for (const l in expected) fp[l]=0;
+    for (let i=0;i<ents.length;i++) {
+        if (matched.has(i)) continue;
+        extras.push(`${ents[i].label}:${ents[i].text}`);
+        for (const l in expected) { if (ents[i].label.includes(l)) { fp[l]++; break; } }
+    }
+    const f1 = {};
+    for (const l in expected) {
+        const p = (tp[l]+fp[l]) ? tp[l]/(tp[l]+(fp[l]||0)) : 0;
+        const r = (tp[l]+fn[l]) ? tp[l]/(tp[l]+fn[l]) : 0;
+        f1[l] = (p+r) ? +(2*p*r/(p+r)).toFixed(2) : 0;
+    }
+    const totalExp = Object.values(expected).reduce((s,v)=>s+v.length,0);
+    let verdict;
+    if (hits.length===totalExp && !extras.length) verdict='PERFECT';
+    else if (hits.length===totalExp) verdict='EXTRA';
+    else if (hits.length>0) verdict=`PARTIAL (${Math.round(hits.length/totalExp*100)}%)`;
+    else verdict='MISS';
+    return {hits,misses,extras,verdict,f1};
+}
+
+window.runTestSuite = async function() {
+    if (!loaded) return;
+    const btn = document.getElementById('test-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="running-indicator"></span>Running...';
+    const div = document.getElementById('test-results');
+    div.innerHTML = '';
+
+    const rows = [];
+    let perfect=0, partial=0, miss=0, fp=0;
+
+    for (const [name, text, labels, expected] of TEST_SUITE) {
+        const t0 = performance.now();
+        try {
+            const results = await predict(text, labels);
+            const ents = extractEntities(results);
+            const elapsed = performance.now() - t0;
+            const j = judge(expected, ents);
+            rows.push({ name, verdict: j.verdict, misses: j.misses, extras: j.extras, f1: j.f1, time: elapsed });
+        } catch(e) {
+            rows.push({ name, verdict: 'ERROR', misses: [], extras: [], f1: {}, time: 0, error: e.message });
+        }
+        // render incrementally
+        renderTestRows(rows, div);
+    }
+
+    for (const r of rows) {
+        if (r.verdict==='PERFECT') perfect++;
+        else if (r.verdict==='EXTRA'||r.verdict.includes('PARTIAL')) partial++;
+        else if (r.verdict==='MISS') miss++;
+        else fp++;
+    }
+    const allF1 = rows.flatMap(r => Object.values(r.f1));
+    const macroF1 = allF1.length ? (allF1.reduce((a,b)=>a+b,0)/allF1.length).toFixed(2) : '0.00';
+    const totalTime = rows.reduce((s,r)=>s+r.time,0);
+
+    let summary = `<div class="test-summary">`;
+    summary += `<span class="summary-stat badge-perfect">${perfect} perfect</span>`;
+    summary += `<span class="summary-stat badge-partial">${partial} partial/extra</span>`;
+    summary += `<span class="summary-stat badge-miss">${miss} miss</span>`;
+    summary += `<span>Macro-F1: ${macroF1}</span>`;
+    summary += `<span style="color:#64748b">${(totalTime/1000).toFixed(1)}s total &middot; ${(totalTime/rows.length).toFixed(0)}ms avg</span>`;
+    summary += `</div>`;
+    div.innerHTML += summary;
+
+    btn.disabled = false;
+    btn.textContent = 'Run All Tests';
+};
+
+function renderTestRows(rows, div) {
+    let html = '';
+    for (const r of rows) {
+        const bc = r.verdict==='PERFECT'?'badge-perfect':r.verdict==='EXTRA'?'badge-extra':r.verdict.includes('PARTIAL')?'badge-partial':r.verdict==='MISS'?'badge-miss':'badge-fp';
+        html += `<div class="test-row"><div class="test-header">`;
+        html += `<span class="test-name">${esc(r.name)}</span>`;
+        html += `<span class="badge ${bc}">${esc(r.verdict)}</span>`;
+        if (Object.keys(r.f1).length) {
+            const f1s = Object.entries(r.f1).map(([k,v])=>`${k}: ${v}`).join(', ');
+            html += `<span style="font-size:0.78em;color:#94a3b8">{${f1s}}</span>`;
+        }
+        html += `<span class="test-meta">${r.time.toFixed(0)}ms</span>`;
+        html += `</div>`;
+        if (r.misses.length || r.extras.length || r.error) {
+            html += `<div class="test-details">`;
+            if (r.misses.length) html += `<div class="missed">missed: ${esc(r.misses.join('; '))}</div>`;
+            if (r.extras.length) html += `<div class="extra">extra: ${esc(r.extras.join('; '))}</div>`;
+            if (r.error) html += `<div class="missed">error: ${esc(r.error)}</div>`;
+            html += `</div>`;
+        }
+        html += `</div>`;
+    }
+    div.innerHTML = html;
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+</script>
+</body>
+</html>
