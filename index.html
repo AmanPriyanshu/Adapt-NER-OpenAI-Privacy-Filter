@@ -325,8 +325,8 @@ window.loadModels = async function() {
 
         status.textContent = isCached ? 'Loading tokenizers (cached)...' : 'Loading tokenizers...';
         [bbTok, arcticTok] = await Promise.all([
-            AutoTokenizer.from_pretrained(`${HF}/${REPO}/resolve/main/backbone`, { progress_callback: null }),
-            AutoTokenizer.from_pretrained(`${HF}/${REPO}/resolve/main/arctic`, { progress_callback: null }),
+            AutoTokenizer.from_pretrained(`${HF}/${REPO}/resolve/main/onnx/backbone`, { progress_callback: null }),
+            AutoTokenizer.from_pretrained(`${HF}/${REPO}/resolve/main/onnx/arctic`, { progress_callback: null }),
         ]);
         el('prog-tok').style.width='100%'; el('prog-tok').classList.add('done');
 
