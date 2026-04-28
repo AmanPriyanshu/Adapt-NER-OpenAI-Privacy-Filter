@@ -117,8 +117,8 @@ if (!navigator.gpu) {
 
 const HF = 'https://huggingface.co';
 const REPO = 'AmanPriyanshu/openai-privacy-filter-generalized-for-dynamic-labels-ner';
-const BB_TOK_REPO = REPO;
-const ARCTIC_TOK_REPO = REPO;
+const BB_TOK_ID = REPO;
+const ARCTIC_TOK_ID = REPO;
 const BB_GRAPH = `${HF}/${REPO}/resolve/main/onnx/backbone/model_quantized_hidden.onnx`;
 const BB_DATA = `${HF}/${REPO}/resolve/main/onnx/backbone/model_quantized.onnx_data`;
 const ARCTIC_URL = `${HF}/${REPO}/resolve/main/onnx/arctic/encoder_int8.onnx`;
@@ -325,8 +325,8 @@ window.loadModels = async function() {
 
         status.textContent = isCached ? 'Loading tokenizers (cached)...' : 'Loading tokenizers...';
         [bbTok, arcticTok] = await Promise.all([
-            AutoTokenizer.from_pretrained(BB_TOK_REPO, { progress_callback: null, subfolder: 'backbone' }),
-            AutoTokenizer.from_pretrained(ARCTIC_TOK_REPO, { progress_callback: null, subfolder: 'arctic' }),
+            AutoTokenizer.from_pretrained(`${HF}/${REPO}/resolve/main/backbone`, { progress_callback: null }),
+            AutoTokenizer.from_pretrained(`${HF}/${REPO}/resolve/main/arctic`, { progress_callback: null }),
         ]);
         el('prog-tok').style.width='100%'; el('prog-tok').classList.add('done');
 
