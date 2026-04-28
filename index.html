@@ -116,12 +116,13 @@ if (!navigator.gpu) {
 }
 
 const HF = 'https://huggingface.co';
-const BB_REPO = 'AmanPriyanshu/openai-generic-privacy-filter-backbone';
-const ENC_REPO = 'AmanPriyanshu/openai-generic-privacy-filter-lm-encoder';
-const BB_GRAPH = `${HF}/${BB_REPO}/resolve/main/model_quantized_hidden.onnx`;
-const BB_DATA = `${HF}/${BB_REPO}/resolve/main/model_quantized.onnx_data`;
-const ARCTIC_URL = `${HF}/${ENC_REPO}/resolve/main/encoder_int8.onnx`;
-const PROJ_URL = `${HF}/${ENC_REPO}/resolve/main/projection.npz`;
+const REPO = 'AmanPriyanshu/openai-privacy-filter-generalized-for-dynamic-labels-ner';
+const BB_REPO = REPO;
+const ENC_REPO = REPO;
+const BB_GRAPH = `${HF}/${REPO}/resolve/main/onnx/backbone/model_quantized_hidden.onnx`;
+const BB_DATA = `${HF}/${REPO}/resolve/main/onnx/backbone/model_quantized.onnx_data`;
+const ARCTIC_URL = `${HF}/${REPO}/resolve/main/onnx/arctic/encoder_int8.onnx`;
+const PROJ_URL = `${HF}/${REPO}/resolve/main/onnx/arctic/projection.npz`;
 
 // Check if models are already cached and update button text
 caches.open('adaptive-ner-models-v1').then(cache =>
@@ -324,8 +325,8 @@ window.loadModels = async function() {
 
         status.textContent = isCached ? 'Loading tokenizers (cached)...' : 'Loading tokenizers...';
         [bbTok, arcticTok] = await Promise.all([
-            AutoTokenizer.from_pretrained(BB_REPO, { progress_callback: null }),
-            AutoTokenizer.from_pretrained(ENC_REPO, { progress_callback: null }),
+            AutoTokenizer.from_pretrained(REPO, { progress_callback: null, subfolder: 'original/backbone' }),
+            AutoTokenizer.from_pretrained(REPO, { progress_callback: null, subfolder: 'original/arctic' }),
         ]);
         el('prog-tok').style.width='100%'; el('prog-tok').classList.add('done');
 
