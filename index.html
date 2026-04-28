@@ -99,10 +99,10 @@ footer a{color:#3b82f6;text-decoration:none}
 <footer>
 Models: <a href="https://huggingface.co/AmanPriyanshu/openai-generic-privacy-filter-backbone" target="_blank">Backbone</a>
 &middot; <a href="https://huggingface.co/AmanPriyanshu/openai-generic-privacy-filter-lm-encoder" target="_blank">Label Encoder</a>
-&middot; Powered by ONNX Runtime Web (WebGPU)
+&middot; Powered by ONNX Runtime Web
 </footer>
-<div id="webgpu-warning" style="display:none;text-align:center;padding:16px;margin:16px;background:#7f1d1d;border-radius:8px;color:#fca5a5;font-size:0.9em">
-⚠ WebGPU not available. This demo requires a WebGPU-capable browser (Chrome 113+, Edge 113+) served over HTTPS or localhost. <code>file://</code> will not work.
+<div id="webgpu-warning" style="display:none;text-align:center;padding:16px;margin:16px;background:#92400e;border-radius:8px;color:#fde68a;font-size:0.9em">
+WebGPU not available — label encoder will use WASM (slower). For best performance use Chrome 113+ or Edge 113+ over HTTPS or localhost.
 </div>
 </div>
 
@@ -110,8 +110,9 @@ Models: <a href="https://huggingface.co/AmanPriyanshu/openai-generic-privacy-fil
 import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0';
 
 if (!navigator.gpu) {
+    // WebGPU optional — Arctic encoder benefits from it but falls back to WASM.
+    // Backbone always uses WASM for fp32 precision in the RMS norm layer.
     document.getElementById('webgpu-warning').style.display = 'block';
-    document.getElementById('load-btn').disabled = true;
 }
 
 const HF = 'https://huggingface.co';
@@ -307,6 +308,10 @@ window.loadModels = async function() {
 
     try {
         ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
+        // Multi-threading requires COOP/COEP headers for SharedArrayBuffer.
+        // Falls back to single-threaded if headers are missing.
+        ort.env.wasm.numThreads = (typeof SharedArrayBuffer !== 'undefined')
+            ? (navigator.hardwareConcurrency || 4) : 1;
 
         // Check if models are already cached
         const cache = await caches.open(CACHE_NAME);
@@ -328,10 +333,14 @@ window.loadModels = async function() {
         const graphBuf = await fetchProgress(BB_GRAPH, null);
         status.textContent = isCached ? 'Loading backbone weights (cached)...' : 'Downloading backbone weights (1.6 GB)...';
         const dataBuf = await fetchProgress(BB_DATA, el('prog-bb'));
-        status.textContent = 'Initializing backbone session (WebGPU)...';
-        const bbEPs = ['webgpu', 'wasm'];
+        status.textContent = 'Initializing backbone session...';
+        // Bug fix: Must use WASM (fp32) for backbone — NOT WebGPU.
+        // The final RMS norm has pre-norm residual elements up to ~7000. On WebGPU,
+        // internal fp16 compute squares these (7000^2 = 49M >> fp16 max 65504), causing
+        // overflow that corrupts the norm's output direction. Result: entity scores
+        // dominate O for ALL tokens. WASM uses fp32 which handles this correctly.
         bb = await ort.InferenceSession.create(graphBuf, {
-            executionProviders: bbEPs,
+            executionProviders: ['wasm'],
             externalData: [{ data: dataBuf, path: 'model_quantized.onnx_data' }],
         });
 
@@ -339,7 +348,7 @@ window.loadModels = async function() {
         const arcticBuf = await fetchProgress(ARCTIC_URL, el('prog-arctic'));
         status.textContent = 'Initializing encoder session...';
         arctic = await ort.InferenceSession.create(arcticBuf, {
-            executionProviders: bbEPs,
+            executionProviders: ['webgpu', 'wasm'],
         });
 
         status.textContent = isCached ? 'Loading projection (cached)...' : 'Loading projection...';
