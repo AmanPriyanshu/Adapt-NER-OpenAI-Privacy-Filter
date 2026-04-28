@@ -71,6 +71,7 @@ footer a{color:#3b82f6;text-decoration:none}
 
 <section id="load-section">
 <button id="load-btn" onclick="loadModels()">Load Models (~2.2 GB)</button>
+<button id="clear-cache-btn" onclick="clearModelCache()" style="background:#334155;margin-left:8px;font-size:0.82em;padding:8px 16px">Clear Cache</button>
 <div class="progress-area" id="progress-area" style="display:none">
 <div class="progress-row"><span>Backbone (1.6 GB)</span><div class="progress-bar"><div class="progress-fill" id="prog-bb"></div></div></div>
 <div class="progress-row"><span>Label Encoder (542 MB)</span><div class="progress-bar"><div class="progress-fill" id="prog-arctic"></div></div></div>
@@ -121,6 +122,15 @@ const BB_DATA = `${HF}/${BB_REPO}/resolve/main/model_quantized.onnx_data`;
 const ARCTIC_URL = `${HF}/${ENC_REPO}/resolve/main/encoder_int8.onnx`;
 const PROJ_URL = `${HF}/${ENC_REPO}/resolve/main/projection.npz`;
 
+// Check if models are already cached and update button text
+caches.open('adaptive-ner-models-v1').then(cache =>
+    cache.match(BB_DATA)
+).then(cached => {
+    if (cached) {
+        document.getElementById('load-btn').textContent = 'Load Models (cached)';
+    }
+}).catch(() => {});
+
 const PALETTE = ['#ef4444','#3b82f6','#22c55e','#f59e0b','#8b5cf6','#ec4899','#06b6d4','#f97316','#14b8a6','#6366f1','#84cc16','#d946ef','#0ea5e9','#f43f5e','#a855f7'];
 const TEMPLATES = {B:'beginning of {l}',I:'continuation of {l}',E:'end of {l}',S:'complete {l}'};
 
@@ -135,7 +145,42 @@ function parseNpy(buf) {
     const hOff = major >= 2 ? 12 : 10;
     const hdr = new TextDecoder().decode(new Uint8Array(buf, hOff, hLen));
     const shape = hdr.match(/'shape':\s*\(([^)]*)\)/)[1].split(',').filter(s=>s.trim()).map(Number);
-    return { data: new Float32Array(buf, hOff + hLen), shape };
+    const dataOffset = hOff + hLen;
+    const fortranOrder = hdr.includes("'fortran_order': True") || hdr.includes("'fortran_order':True");
+    // Handle different dtypes
+    const descrMatch = hdr.match(/'descr':\s*'([^']+)'/);
+    const descr = descrMatch ? descrMatch[1] : '<f4';
+    let data;
+    if (descr.includes('f8')) {
+        // float64 → convert to float32
+        const f64 = new Float64Array(buf, dataOffset);
+        data = new Float32Array(f64.length);
+        for (let i = 0; i < f64.length; i++) data[i] = f64[i];
+    } else if (descr.includes('f2')) {
+        // float16 → convert to float32
+        const u16 = new Uint16Array(buf, dataOffset);
+        data = new Float32Array(u16.length);
+        for (let i = 0; i < u16.length; i++) {
+            const bits = u16[i];
+            const sign = (bits >> 15) & 1, exp = (bits >> 10) & 0x1F, frac = bits & 0x3FF;
+            if (exp === 0) data[i] = (sign ? -1 : 1) * Math.pow(2, -14) * (frac / 1024);
+            else if (exp === 31) data[i] = frac ? NaN : (sign ? -Infinity : Infinity);
+            else data[i] = (sign ? -1 : 1) * Math.pow(2, exp - 15) * (1 + frac / 1024);
+        }
+    } else {
+        // float32 (default)
+        data = new Float32Array(buf, dataOffset);
+    }
+    // Transpose if Fortran-order (column-major) — convert to C-order (row-major)
+    if (fortranOrder && shape.length === 2) {
+        const [rows, cols] = shape;
+        const transposed = new Float32Array(rows * cols);
+        for (let r = 0; r < rows; r++)
+            for (let c = 0; c < cols; c++)
+                transposed[r * cols + c] = data[c * rows + r];
+        data = transposed;
+    }
+    return { data, shape };
 }
 async function parseNpz(buf) {
     const zip = await JSZip.loadAsync(buf);
@@ -205,21 +250,50 @@ function matmulTransB(a, aR, aC, b, bR, bC) {
     return out;
 }
 
-// ── Fetch with progress ────────────────────────────────────────────────
+// ── Fetch with progress + Cache API persistence ──────────────────────
+const CACHE_NAME = 'adaptive-ner-models-v1';
+
 async function fetchProgress(url, el) {
+    // Check Cache API first
+    const cache = await caches.open(CACHE_NAME);
+    const cached = await cache.match(url);
+    if (cached) {
+        // Serve from cache — instant on subsequent loads
+        if (el) { el.style.width = '100%'; el.classList.add('done'); }
+        console.log(`[Cache HIT] ${url.split('/').pop()}`);
+        return await cached.arrayBuffer();
+    }
+
+    console.log(`[Cache MISS] Downloading ${url.split('/').pop()}...`);
     const res = await fetch(url);
-    const total = +(res.headers.get('content-length')||0);
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
+
+    const total = +(res.headers.get('content-length') || 0);
     const reader = res.body.getReader();
     const chunks = []; let got = 0;
     while (true) {
         const {done, value} = await reader.read();
         if (done) break;
         chunks.push(value); got += value.length;
-        if (el && total) el.style.width = (got/total*100)+'%';
+        if (el && total) el.style.width = (got / total * 100) + '%';
     }
-    if (el) { el.style.width='100%'; el.classList.add('done'); }
-    const buf = new Uint8Array(got); let off=0;
+    if (el) { el.style.width = '100%'; el.classList.add('done'); }
+    const buf = new Uint8Array(got); let off = 0;
     for (const c of chunks) { buf.set(c, off); off += c.length; }
+
+    // Store in Cache API for next load — construct Response from buffer
+    // (more reliable than clone() for large files on mobile)
+    try {
+        const cacheResponse = new Response(buf.buffer, {
+            status: 200,
+            headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(got) }
+        });
+        await cache.put(url, cacheResponse);
+        console.log(`[Cached] ${url.split('/').pop()} (${(got/1e6).toFixed(1)} MB)`);
+    } catch(e) {
+        console.warn('Cache store failed:', e);
+    }
+
     return buf.buffer;
 }
 
@@ -234,16 +308,25 @@ window.loadModels = async function() {
     try {
         ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
 
-        status.textContent = 'Loading tokenizers...';
+        // Check if models are already cached
+        const cache = await caches.open(CACHE_NAME);
+        const isCached = await cache.match(BB_DATA);
+        if (isCached) {
+            status.textContent = 'Loading from cache...';
+        } else {
+            status.textContent = 'First load — downloading models (cached for next time)...';
+        }
+
+        status.textContent = isCached ? 'Loading tokenizers (cached)...' : 'Loading tokenizers...';
         [bbTok, arcticTok] = await Promise.all([
-            AutoTokenizer.from_pretrained(BB_REPO),
-            AutoTokenizer.from_pretrained(ENC_REPO),
+            AutoTokenizer.from_pretrained(BB_REPO, { progress_callback: null }),
+            AutoTokenizer.from_pretrained(ENC_REPO, { progress_callback: null }),
         ]);
         el('prog-tok').style.width='100%'; el('prog-tok').classList.add('done');
 
-        status.textContent = 'Downloading backbone graph...';
+        status.textContent = isCached ? 'Loading backbone graph (cached)...' : 'Downloading backbone graph...';
         const graphBuf = await fetchProgress(BB_GRAPH, null);
-        status.textContent = 'Downloading backbone weights (1.6 GB)...';
+        status.textContent = isCached ? 'Loading backbone weights (cached)...' : 'Downloading backbone weights (1.6 GB)...';
         const dataBuf = await fetchProgress(BB_DATA, el('prog-bb'));
         status.textContent = 'Initializing backbone session (WebGPU)...';
         const bbEPs = ['webgpu', 'wasm'];
@@ -252,21 +335,25 @@ window.loadModels = async function() {
             externalData: [{ data: dataBuf, path: 'model_quantized.onnx_data' }],
         });
 
-        status.textContent = 'Downloading label encoder (542 MB)...';
+        status.textContent = isCached ? 'Loading label encoder (cached)...' : 'Downloading label encoder (542 MB)...';
         const arcticBuf = await fetchProgress(ARCTIC_URL, el('prog-arctic'));
         status.textContent = 'Initializing encoder session...';
         arctic = await ort.InferenceSession.create(arcticBuf, {
             executionProviders: bbEPs,
         });
 
-        status.textContent = 'Loading projection...';
+        status.textContent = isCached ? 'Loading projection (cached)...' : 'Loading projection...';
         const projBuf = await fetchProgress(PROJ_URL, el('prog-proj'));
         const npz = await parseNpz(projBuf);
         projW = npz.proj_w.data; projB = npz.proj_b.data; oEmbed = npz.o_embed.data;
+        console.log('Projection shapes — projW:', npz.proj_w.shape, '(expect [640,1024]), projB:', npz.proj_b.shape, '(expect [640]), oEmbed:', npz.o_embed.shape, '(expect [640])');
+        console.log('Projection norms — projW-row0:', Math.sqrt(projW.slice(0,1024).reduce((s,v)=>s+v*v,0)).toFixed(4), 'oEmbed:', Math.sqrt(oEmbed.reduce((s,v)=>s+v*v,0)).toFixed(4));
         el('prog-proj').style.width='100%'; el('prog-proj').classList.add('done');
 
         loaded = true;
-        status.innerHTML = '<span style="color:#22c55e">Models loaded. Ready.</span>';
+        status.innerHTML = isCached
+            ? '<span style="color:#22c55e">Models loaded from cache. Ready.</span>'
+            : '<span style="color:#22c55e">Models loaded and cached. Next load will be instant.</span>';
         document.getElementById('demo-section').style.display = 'block';
         document.getElementById('test-section').style.display = 'block';
         initChips(['malware tool','port','command and control domain','exfiltration technique']);
@@ -278,6 +365,17 @@ window.loadModels = async function() {
         status.innerHTML = `<span class="error">Error: ${msg || 'unknown'}</span>`;
         btn.disabled = false;
         console.error('Load error:', e);
+    }
+};
+
+// ── Clear cache ───────────────────────────────────────────────────────
+window.clearModelCache = async function() {
+    const status = document.getElementById('load-status');
+    const deleted = await caches.delete(CACHE_NAME);
+    if (deleted) {
+        status.innerHTML = '<span style="color:#f59e0b">Model cache cleared. Next load will re-download.</span>';
+    } else {
+        status.innerHTML = '<span style="color:#94a3b8">No cache to clear.</span>';
     }
 };
 
@@ -306,12 +404,35 @@ async function predict(text, labels) {
         attention_mask: new ort.Tensor('int64', toBig(leEnc.attention_mask.data), leEnc.attention_mask.dims),
     };
     const arcticOut = await arctic.run(arcticFeed);
-    const arcticRaw = arcticOut[arctic.outputNames[0]].data;
+    // Prefer 2D output (CLS-pooled) over 3D (full sequence) if multiple outputs exist
+    let arcticTensor = arcticOut[arctic.outputNames[0]];
+    for (const name of arctic.outputNames) {
+        const t = arcticOut[name];
+        if (t.dims.length === 2 && t.dims[1] === 1024) {
+            arcticTensor = t;
+            break;
+        }
+    }
+    const arcticDims = arcticTensor.dims;
+    const arcticRaw = arcticTensor.data;
     let clsData;
     if (arcticRaw instanceof Float32Array) { clsData = arcticRaw; }
     else { clsData = new Float32Array(Array.from(arcticRaw).map(Number)); }
-    console.log('Arctic output type:', arcticRaw.constructor?.name, 'norm[0]:', Math.sqrt(clsData.slice(0,1024).reduce((s,v)=>s+v*v,0)).toFixed(2));
     const N4 = labels.length * 4;
+
+    // If Arctic output is 3D (batch, seq_len, hidden), extract CLS (position 0) from each sequence
+    if (arcticDims.length === 3) {
+        const seqLen = arcticDims[1];
+        const hiddenDim = arcticDims[2];
+        console.log('Arctic output is 3D:', arcticDims, '— extracting CLS tokens');
+        const clsExtracted = new Float32Array(N4 * hiddenDim);
+        for (let i = 0; i < N4; i++) {
+            const srcOffset = i * seqLen * hiddenDim; // start of sequence i
+            clsExtracted.set(clsData.subarray(srcOffset, srcOffset + hiddenDim), i * hiddenDim);
+        }
+        clsData = clsExtracted;
+    }
+    console.log('Arctic CLS norm[0]:', Math.sqrt(clsData.slice(0,1024).reduce((s,v)=>s+v*v,0)).toFixed(2), 'dims:', arcticDims);
 
     const projected = matmulTransB(clsData, N4, 1024, projW, 640, 1024);
     for (let i=0;i<N4;i++) for (let j=0;j<640;j++) projected[i*640+j] += projB[j];
@@ -355,11 +476,20 @@ async function predict(text, labels) {
     }
     if (!hiddenData) throw new Error('Hidden states output not found in backbone');
 
-    // Debug: check O embed dot product vs label embed dot product for first token
+    // Debug: show all tag scores for first token to identify which tags dominate
     {
-        let dotO = 0, dotL = 0;
-        for (let k=0;k<640;k++) { dotO += hiddenData[k]*embeds[k]; dotL += hiddenData[k]*embeds[640+k]; }
-        console.log('Debug scores token0: O=', dotO.toFixed(3), 'label[0]=', dotL.toFixed(3));
+        const debugScores = [];
+        for (let j = 0; j < nTags; j++) {
+            let dot = 0;
+            for (let k = 0; k < 640; k++) dot += hiddenData[k] * embeds[j*640+k];
+            debugScores.push(dot);
+        }
+        const tagNames = ['O'];
+        for (const l of labels) for (const p of ['B','I','E','S']) tagNames.push(`${p}-${l}`);
+        // Find top 5 scoring tags
+        const indexed = debugScores.map((s,i) => ({s, i})).sort((a,b) => b.s - a.s);
+        console.log('Token0 scores — O:', debugScores[0].toFixed(3),
+            '| top5:', indexed.slice(0,5).map(x => `${tagNames[x.i]}=${x.s.toFixed(3)}`).join(', '));
     }
 
     const scores = matmulTransB(hiddenData, T, 640, embeds, nTags, 640);
